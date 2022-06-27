@@ -14,6 +14,15 @@
 
 <h2> Implementation </h2>
 
+<h3> Collect default gateway and host information </h3>
+
+```python
+HOST_IP = get_if_addr(conf.iface)  # default interface
+HOST_MAC = get_if_hwaddr(conf.iface) # default interface
+GW_IP = conf.route.route("0.0.0.0")[2] # gateway
+SUBNET = GW_IP + '/24'
+```
+
 <h3> Man-in-the-middle attack </h3>
 
 1. Scan interfaces

